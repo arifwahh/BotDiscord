@@ -113,8 +113,8 @@ async def set_shares_channel(interaction: discord.Interaction, channel: discord.
         f"Channel share loot diatur ke: {channel.mention}"
     )
 
-@bot.tree.command(name="sharescreate", description="Buat share sheet baru")
-@app_commands.describe(name="Nama share", drops="Item drops (pisahkan dengan koma)")
+@bot.tree.command(name="sharescreate", description="Make a share sheet")
+@app_commands.describe(name="Share Name", drops="Drop Items (Separated by commas)")
 async def create_share(interaction: discord.Interaction, name: str, drops: str):
     user_id = interaction.user.id
     share_id = db_execute(
