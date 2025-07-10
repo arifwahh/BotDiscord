@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 if not TOKEN:
-    logging.error("Token tidak ditemukan! Pastikan file .env sudah berisi DISCORD_TOKEN.")
+    logging.error("Token not found! Please make sure .env file contains DISCORD_TOKEN.")
     exit(1)
 
 intents = discord.Intents.default()
@@ -25,7 +25,7 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # Tabel untuk Share Loot
+    # Table for Share Loot
     c.execute('''CREATE TABLE IF NOT EXISTS shares (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
@@ -42,7 +42,7 @@ def init_db():
         FOREIGN KEY (share_id) REFERENCES shares (id)
     )''')
     
-    # Tabel untuk Summer Race
+    # Table for Summer Race
     c.execute('''CREATE TABLE IF NOT EXISTS npcs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT UNIQUE NOT NULL,
@@ -95,25 +95,28 @@ def db_fetch(query, params=(), fetch_one=False):
 
 # ===== EVENT HANDLERS =====
 @bot.event
+@bot.event
 async def on_ready():
-    print(f'Bot berhasil login sebagai {bot.user}')
+    print(f'Bot logged in as {bot.user}')
     try:
+        await bot.load_extension("mvp_tracker")  # Load cog, ini otomatis memanggil setup
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} commands")
         check_race_schedule.start()
     except Exception as e:
-        print(e)
+        print(f"Error during on_ready: {e}")
+
 
 # ===== SHARE LOOT SYSTEM =====
-@bot.tree.command(name="setshares", description="Set channel untuk info share loot")
-@app_commands.describe(channel="Channel untuk share loot")
+@bot.tree.command(name="setshares", description="Set channel for share loot info")
+@app_commands.describe(channel="Channel for share loot")
 async def set_shares_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    # Simpan channel ID di database (implementasi disederhanakan)
+    # Save channel ID in database (simplified implementation)
     await interaction.response.send_message(
-        f"Channel share loot diatur ke: {channel.mention}"
+        f"Share loot channel set to: {channel.mention}"
     )
 
-@bot.tree.command(name="sharescreate", description="Make a share sheet")
+@bot.tree.command(name="sharescreate", description="Create a share sheet")
 @app_commands.describe(name="Share Name", drops="Drop Items (Separated by commas)")
 async def create_share(interaction: discord.Interaction, name: str, drops: str):
     user_id = interaction.user.id
@@ -122,26 +125,26 @@ async def create_share(interaction: discord.Interaction, name: str, drops: str):
         (name, drops, user_id)
     )
     
-    # Tambahkan pembuat sebagai peserta pertama
+    # Add creator as first participant
     db_execute(
         "INSERT INTO share_participants (share_id, user_id) VALUES (?, ?)",
         (share_id, user_id)
     )
     
     embed = discord.Embed(
-        title=f"Share Sheet #{share_id} Dibuat",
+        title=f"Share Sheet #{share_id} Created",
         description=f"**{name}**",
         color=discord.Color.green()
     )
     embed.add_field(name="Drops", value=drops, inline=False)
-    embed.add_field(name="Pembuat", value=interaction.user.mention, inline=True)
+    embed.add_field(name="Creator", value=interaction.user.mention, inline=True)
     embed.add_field(name="Status", value="🟢 Active", inline=True)
-    embed.set_footer(text=f"Gunakan /shares {share_id} untuk melihat detail")
+    embed.set_footer(text=f"Use /shares {share_id} to view details")
     
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="shares", description="Lihat info share sheet")
-@app_commands.describe(share_id="ID share sheet")
+@bot.tree.command(name="shares", description="View share sheet info")
+@app_commands.describe(share_id="Share sheet ID")
 async def view_share(interaction: discord.Interaction, share_id: int):
     share = db_fetch(
         "SELECT * FROM shares WHERE id = ?", 
@@ -150,7 +153,7 @@ async def view_share(interaction: discord.Interaction, share_id: int):
     )
     
     if not share:
-        await interaction.response.send_message(f"Share sheet #{share_id} tidak ditemukan!")
+        await interaction.response.send_message(f"Share sheet #{share_id} not found!")
         return
     
     participants = db_fetch(
@@ -158,7 +161,7 @@ async def view_share(interaction: discord.Interaction, share_id: int):
         (share_id,)
     )
     
-    # Format daftar peserta
+    # Format participants list
     participants_list = []
     for user_id in participants:
         user = await bot.fetch_user(user_id[0])
@@ -170,23 +173,23 @@ async def view_share(interaction: discord.Interaction, share_id: int):
         color=discord.Color.blue()
     )
     embed.add_field(name="Drops", value=share[2], inline=False)
-    embed.add_field(name="Pembuat", value=f"<@{share[4]}>", inline=True)
+    embed.add_field(name="Creator", value=f"<@{share[4]}>", inline=True)
     embed.add_field(name="Status", value=share[6], inline=True)
-    embed.add_field(name="Peserta", value="\n".join(participants_list) if participants_list else "Belum ada peserta", inline=False)
-    embed.set_footer(text=f"Dibuat pada: {share[5]}")
+    embed.add_field(name="Participants", value="\n".join(participants_list) if participants_list else "No participants yet", inline=False)
+    embed.set_footer(text=f"Created at: {share[5]}")
     
     await interaction.response.send_message(embed=embed)
 
 # ===== SUMMER RACE SYSTEM =====
-@bot.tree.command(name="mainnpcedit", description="Edit atau tambah NPC utama")
+@bot.tree.command(name="mainnpcedit", description="Edit or add main NPC")
 @app_commands.describe(
-    npc_name="Nama NPC",
-    theme="Tema",
-    map_location="Lokasi map",
-    direction="Arah",
-    map_link="Link map (opsional)",
-    map_image="Link gambar map (opsional)",
-    npc_image="Link gambar NPC (opsional)"
+    npc_name="NPC name",
+    theme="Theme",
+    map_location="Map location",
+    direction="Direction",
+    map_link="Map link (optional)",
+    map_image="Map image link (optional)",
+    npc_image="NPC image link (optional)"
 )
 async def edit_main_npc(
     interaction: discord.Interaction, 
@@ -198,7 +201,7 @@ async def edit_main_npc(
     map_image: str = None,
     npc_image: str = None
 ):
-    # Cek apakah NPC sudah ada
+    # Check if NPC exists
     existing = db_fetch(
         "SELECT id FROM npcs WHERE name = ?",
         (npc_name,),
@@ -217,7 +220,7 @@ async def edit_main_npc(
             WHERE name = ?""",
             (theme, map_location, direction, map_link, map_image, npc_image, npc_name)
         )
-        action = "diperbarui"
+        action = "updated"
     else:
         db_execute(
             """INSERT INTO npcs (
@@ -225,14 +228,14 @@ async def edit_main_npc(
             ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (npc_name, theme, map_location, direction, map_link, map_image, npc_image)
         )
-        action = "ditambahkan"
+        action = "added"
     
     await interaction.response.send_message(
-        f"NPC **{npc_name}** berhasil {action}!"
+        f"NPC **{npc_name}** successfully {action}!"
     )
 
-@bot.tree.command(name="setrace", description="Atur waktu race berikutnya")
-@app_commands.describe(hours="Jam (00-23)", minutes="Menit (00-59)")
+@bot.tree.command(name="setrace", description="Set next race time")
+@app_commands.describe(hours="Hour (00-23)", minutes="Minute (00-59)")
 async def set_race_time(interaction: discord.Interaction, hours: int, minutes: int):
     now = datetime.now()
     next_race = now.replace(
@@ -242,18 +245,18 @@ async def set_race_time(interaction: discord.Interaction, hours: int, minutes: i
         microsecond=0
     )
     
-    # Jika waktu sudah lewat hari ini, atur untuk besok
+    # If time already passed today, set for tomorrow
     if next_race < now:
         next_race += timedelta(days=1)
     
-    # Simpan jadwal
+    # Save schedule
     db_execute(
         "INSERT INTO race_schedule (next_race) VALUES (?)",
         (next_race.isoformat(),)
     )
     
     await interaction.response.send_message(
-        f"Race berikutnya dijadwalkan pada: {next_race.strftime('%d/%m/%Y %H:%M')}"
+        f"Next race scheduled at: {next_race.strftime('%m/%d/%Y %H:%M')}"
     )
 
 @tasks.loop(minutes=1)
@@ -267,23 +270,23 @@ async def check_race_schedule():
     if next_race:
         race_time = datetime.fromisoformat(next_race[0])
         if now >= race_time:
-            # Kirim notifikasi
-            channel = bot.get_channel(YOUR_NOTIFICATION_CHANNEL_ID)  # Ganti dengan channel ID
+            # Send notification
+            channel = bot.get_channel(YOUR_NOTIFICATION_CHANNEL_ID)  # Replace with channel ID
             if channel:
                 await channel.send(
-                    f"@everyone Summer Race sudah dimulai! Gunakan /current untuk melihat NPC saat ini"
+                    f"@everyone Summer Race has started! Use /current to see the current NPC"
                 )
             
-            # Atur race berikutnya untuk besok
+            # Set next race for tomorrow
             next_race = race_time + timedelta(days=1)
             db_execute(
                 "INSERT INTO race_schedule (next_race) VALUES (?)",
                 (next_race.isoformat(),)
             )
 
-@bot.tree.command(name="current", description="Tampilkan status NPC saat ini")
+@bot.tree.command(name="current", description="Show current NPC status")
 async def current_npc(interaction: discord.Interaction):
-    # Ambil NPC aktif (disederhanakan)
+    # Get active NPC (simplified)
     npc = db_fetch(
         "SELECT * FROM npcs ORDER BY RANDOM() LIMIT 1",
         fetch_one=True
@@ -291,15 +294,15 @@ async def current_npc(interaction: discord.Interaction):
     
     if npc:
         embed = discord.Embed(
-            title=f"NPC Aktif: {npc[1]}",
-            description=f"**Tema**: {npc[2] or 'Tidak ada tema'}",
+            title=f"Active NPC: {npc[1]}",
+            description=f"**Theme**: {npc[2] or 'No theme'}",
             color=discord.Color.gold()
         )
-        embed.add_field(name="Lokasi", value=npc[3], inline=True)
-        embed.add_field(name="Arah", value=npc[4], inline=True)
+        embed.add_field(name="Location", value=npc[3], inline=True)
+        embed.add_field(name="Direction", value=npc[4], inline=True)
         
         if npc[5]:
-            embed.add_field(name="Link Map", value=f"[Klik disini]({npc[5]})", inline=False)
+            embed.add_field(name="Map Link", value=f"[Click here]({npc[5]})", inline=False)
         if npc[6]:
             embed.set_image(url=npc[6])
         if npc[7]:
@@ -307,9 +310,9 @@ async def current_npc(interaction: discord.Interaction):
             
         await interaction.response.send_message(embed=embed)
     else:
-        await interaction.response.send_message("Tidak ada NPC aktif saat ini!")
+        await interaction.response.send_message("No active NPC at this time!")
 
-# ===== ITEM & MONSTER DATABASE (Contoh) =====
+# ===== ITEM & MONSTER DATABASE (Example) =====
 ITEM_DB = {
     "white spider limb": {
         "id": 6325,
@@ -331,31 +334,31 @@ MONSTER_DB = {
     }
 }
 
-@bot.tree.command(name="listitems", description="Tampilkan semua item di database")
+@bot.tree.command(name="listitems", description="List all items in database")
 async def list_items(interaction: discord.Interaction):
     if not ITEM_DB:
-        await interaction.response.send_message("Database item kosong!")
+        await interaction.response.send_message("Item database is empty!")
         return
 
     embed = discord.Embed(
-        title="Daftar Item di Database",
+        title="Item Database List",
         color=discord.Color.purple()
     )
     for name, data in ITEM_DB.items():
-        desc = f"ID: {data['id']}\nJumlah: {data['amount_needed']}\nDrop: {data['drops_from']}\nRate: {data['drop_rate']}\nMap: {data['best_map']}\nProperty: {data['property']}"
+        desc = f"ID: {data['id']}\nAmount: {data['amount_needed']}\nDrops from: {data['drops_from']}\nRate: {data['drop_rate']}\nBest map: {data['best_map']}\nProperty: {data['property']}"
         embed.add_field(name=name.title(), value=desc, inline=False)
 
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="item", description="Cari informasi item")
-@app_commands.describe(item_name="Nama item yang dicari")
+@bot.tree.command(name="item", description="Search for item information")
+@app_commands.describe(item_name="Item name to search")
 async def item_search(interaction: discord.Interaction, item_name: str):
     item_name = item_name.lower()
     if item_name in ITEM_DB:
         item = ITEM_DB[item_name]
-        # ... (implementasi sama seperti sebelumnya)
+        # ... (implementation same as before)
     else:
-        await interaction.response.send_message(f"Item '{item_name}' tidak ditemukan!")
+        await interaction.response.send_message(f"Item '{item_name}' not found!")
 
 # ===== RUN BOT =====
 if __name__ == "__main__":
