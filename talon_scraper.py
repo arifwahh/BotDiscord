@@ -5,6 +5,7 @@ from datetime import datetime
 import os
 from typing import List, Dict, Optional
 import logging
+import discord
 
 class TalonTalesScraper:
     def __init__(self, db_path: str = "ro_bot.db"):
@@ -186,3 +187,116 @@ class TalonTalesScraper:
         except Exception as e:
             self.logger.error(f"Database error: {str(e)}")
             return False
+        
+    def get_price_statistics(self) -> Dict[str, Dict]:
+        """Calculate price statistics for all items"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT 
+                    item_name,
+                    MIN(price) as min_price,
+                    AVG(price) as avg_price,
+                    COUNT(*) as count
+                FROM vendors
+                GROUP BY item_name
+            ''')
+            return {
+                row[0]: {
+                    'min': row[1],
+                    'avg': int(row[2]),
+                    'count': row[3]
+                }
+                for row in cursor.fetchall()
+            }
+
+    def format_as_discord_message(self) -> str:
+        """Format vendor data like the reference image"""
+        stats = self.get_price_statistics()
+        
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM vendors 
+                ORDER BY price ASC
+                LIMIT 20
+            ''')
+            vendors = cursor.fetchall()
+        
+        if not vendors:
+            return "No vendor data available."
+        
+        # Header similar to reference image
+        message = [
+            "# shopee >",
+            f"{len(vendors)} Online",
+            "",
+            "The BARGAIN item(s) in this list is currently available for purchase",
+            "",
+            "Talon Coin Rate: 989,896z | Vendor Slots: 579/862 | Server Time: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "---"
+        ]
+        
+        for vendor in vendors:
+            item_name = vendor[2]
+            price = vendor[3]
+            vendor_name = vendor[5]
+            location = vendor[7]
+            
+            # Get stats for this item
+            item_stats = stats.get(item_name, {})
+            avg_price = item_stats.get('avg', price)
+            discount = int((1 - (price / avg_price)) * 100) if avg_price else 0
+            
+            # Format like reference image
+            message.extend([
+                f"@{vendor_name} <= {discount}% discount 【{item_name}】",
+                f"[1]:{hash(item_name) % 10000} | **{price:,} z** (min) | {avg_price:,} z (avg) |",
+                f"1 pcs | {location} ► absolute garbage, pls take it",
+                ""
+            ])
+        
+        return "\n".join(message)
+
+    def format_as_discord_embed(self) -> discord.Embed:
+        """Create a Discord embed version of the data"""
+        stats = self.get_price_statistics()
+        
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM vendors 
+                ORDER BY price ASC
+                LIMIT 10
+            ''')
+            vendors = cursor.fetchall()
+        
+        embed = discord.Embed(
+            title="🛍️ Shopee > Vendor Listings",
+            description=f"{len(vendors)} Online\n\nThe BARGAIN item(s) in this list is currently available for purchase",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+        
+        embed.set_footer(text="Talon Coin Rate: 989,896z | Vendor Slots: 579/862")
+        
+        for vendor in vendors:
+            item_name = vendor[2]
+            price = vendor[3]
+            vendor_name = vendor[5]
+            location = vendor[7]
+            
+            item_stats = stats.get(item_name, {})
+            avg_price = item_stats.get('avg', price)
+            discount = int((1 - (price / avg_price)) * 100) if avg_price else 0
+            
+            embed.add_field(
+                name=f"@{vendor_name} <= {discount}% discount 【{item_name}】",
+                value=(
+                    f"`[1]:{hash(item_name) % 10000}` | **{price:,} z** (min) | {avg_price:,} z (avg) |\n"
+                    f"1 pcs | `{location}` ► absolute garbage, pls take it"
+                ),
+                inline=False
+            )
+        
+        return embed

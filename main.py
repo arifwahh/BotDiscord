@@ -252,7 +252,8 @@ async def view_share(interaction: discord.Interaction, share_id: int):
     await interaction.response.send_message(embed=embed)
 
 # ===== VENDOR SCRAPER COMMANDS =====
-@tasks.loop(minutes=15)  # Increased interval to 15 minutes
+# ===== VENDOR SCRAPER COMMANDS =====
+@tasks.loop(minutes=15)
 async def auto_scrape_vendors():
     """Automatically scrape vendor data with robust error handling"""
     logger.info("Starting automatic vendor scrape...")
@@ -262,14 +263,12 @@ async def auto_scrape_vendors():
         return
 
     try:
-        # Create new scraper instance for each run
         scraper = TalonTalesScraper()
         
         if not scraper.login(TALON_USERNAME, TALON_PASSWORD):
             logger.error("Login to Talon Tales failed!")
             return
 
-        # Only scrape first page for automatic updates
         vendor_data = scraper.scrape_vendors(max_pages=1)
         
         if not vendor_data:
@@ -279,47 +278,102 @@ async def auto_scrape_vendors():
         if scraper.save_to_db(vendor_data):
             logger.info(f"Auto-saved {len(vendor_data)} vendor listings")
             
-            # Notification logic remains the same
-            if hasattr(bot, 'scrape_notification_channel'):
+            # Calculate price statistics for new bargains
+            stats = {}
+            with sqlite3.connect(DB_NAME) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT item_name, MIN(price), AVG(price) 
+                    FROM vendors 
+                    GROUP BY item_name
+                ''')
+                stats = {row[0]: {'min': row[1], 'avg': int(row[2])} for row in cursor.fetchall()}
+            
+            # Find new bargains (price < 80% of average)
+            bargains = []
+            for vendor in vendor_data:
+                item_stats = stats.get(vendor['item_name'], {})
+                if item_stats.get('avg') and vendor['price'] <= (item_stats['avg'] * 0.8):
+                    bargains.append({
+                        **vendor,
+                        'discount': int((1 - (vendor['price'] / item_stats['avg'])) * 100)
+                    })
+            
+            # Send notification if there are new bargains
+            if bargains and hasattr(bot, 'scrape_notification_channel'):
                 channel = bot.get_channel(bot.scrape_notification_channel)
                 if channel:
                     embed = discord.Embed(
-                        title="🔄 Automatic Vendor Update",
-                        description=f"Scraped {len(vendor_data)} new vendor listings",
-                        color=discord.Color.blurple()
+                        title="🛍️ New Bargains Found!",
+                        color=discord.Color.green()
                     )
+                    
+                    for bargain in sorted(bargains, key=lambda x: x['discount'], reverse=True)[:3]:
+                        embed.add_field(
+                            name=f"【{bargain['item_name']}】 {bargain['discount']}% OFF",
+                            value=(
+                                f"Price: **{bargain['price']:,}z** (Avg: {item_stats['avg']:,}z)\n"
+                                f"Vendor: `{bargain['vendor_name']}` at `{bargain['location']}`\n"
+                                f"Use `/sj {bargain['vendor_name']}` to locate"
+                            ),
+                            inline=False
+                        )
+                    
                     await channel.send(embed=embed)
                     
     except Exception as e:
         logger.error(f"Auto-scrape failed: {str(e)}")
-    finally:
-        # Clean up
-        if 'scraper' in locals():
-            scraper.session.close()
 
-@bot.tree.command(name="view_vendors", description="View scraped vendor data")
+@bot.tree.command(name="vendors", description="View vendor listings in classic format")
 @app_commands.describe(
-    search_term="Filter by item or vendor name",
-    limit="Number of results to show (max 20)"
+    search_term="Filter by item name",
+    min_discount="Minimum discount percentage",
+    limit="Number of results (max 10)"
 )
-async def view_vendors(
+async def view_vendors_classic(
     interaction: discord.Interaction,
     search_term: Optional[str] = None,
+    min_discount: Optional[int] = None,
     limit: Optional[int] = 5
 ):
-    """Display vendor listings from database"""
+    """Display vendor listings in classic RO format"""
     try:
-        limit = min(max(1, limit), 20)  # Ensure limit is between 1-20
+        limit = min(max(1, limit), 10)
         
-        query = """SELECT item_name, price, amount, vendor_name, location 
-                   FROM vendors"""
+        # Base query with price statistics
+        query = """
+            SELECT 
+                v.item_name,
+                v.price,
+                v.vendor_name,
+                v.location,
+                stats.min_price,
+                stats.avg_price
+            FROM vendors v
+            JOIN (
+                SELECT 
+                    item_name,
+                    MIN(price) as min_price,
+                    AVG(price) as avg_price
+                FROM vendors
+                GROUP BY item_name
+            ) stats ON v.item_name = stats.item_name
+        """
         params = []
         
+        conditions = []
         if search_term:
-            query += " WHERE item_name LIKE ? OR vendor_name LIKE ?"
-            params.extend([f"%{search_term}%", f"%{search_term}%"])
-            
-        query += " ORDER BY scraped_at DESC LIMIT ?"
+            conditions.append("v.item_name LIKE ?")
+            params.append(f"%{search_term}%")
+        
+        if min_discount:
+            conditions.append("(1 - (v.price * 1.0 / stats.avg_price)) * 100 >= ?")
+            params.append(min_discount)
+        
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        
+        query += " ORDER BY (stats.avg_price - v.price) DESC LIMIT ?"
         params.append(limit)
         
         vendors = db_fetch(query, params)
@@ -327,26 +381,201 @@ async def view_vendors(
         if not vendors:
             await interaction.response.send_message("No vendors found matching your criteria!")
             return
+        
+        # Format message like reference image
+        message = [
+            "# shopee >",
+            f"{len(vendors)} Online",
+            "",
+            "The BARGAIN item(s) in this list is currently available for purchase",
+            "",
+            f"Server Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "---"
+        ]
+        
+        for vendor in vendors:
+            item_name, price, vendor_name, location, min_price, avg_price = vendor
+            discount = int((1 - (price / avg_price)) * 100) if avg_price else 0
+            item_id = hash(item_name) % 10000  # Simulate item ID
+            
+            message.extend([
+                f"@{vendor_name} <= {discount}% discount 【{item_name}】",
+                f"[1]:{item_id} | **{price:,} z** (min) | {avg_price:,} z (avg) |",
+                f"1 pcs | {location} ► absolute garbage, pls take it",
+                ""
+            ])
+        
+        await interaction.response.send_message(f"```\n{'\\n'.join(message)}\n```")
+        
+    except Exception as e:
+        logger.error(f"Vendors command error: {e}")
+        await interaction.response.send_message(
+            "An error occurred while fetching vendor data",
+            ephemeral=True
+        )
+
+@bot.tree.command(name="vendors_embed", description="View vendor listings with rich formatting")
+@app_commands.describe(
+    search_term="Filter by item name",
+    min_discount="Minimum discount percentage",
+    limit="Number of results (max 5)"
+)
+async def view_vendors_embed(
+    interaction: discord.Interaction,
+    search_term: Optional[str] = None,
+    min_discount: Optional[int] = None,
+    limit: Optional[int] = 3
+):
+    """Display vendor listings with rich embed formatting"""
+    try:
+        limit = min(max(1, limit), 5)
+        
+        query = """
+            SELECT 
+                item_name,
+                MIN(price) as min_price,
+                MAX(price) as max_price,
+                AVG(price) as avg_price,
+                COUNT(*) as vendor_count,
+                (
+                    SELECT location 
+                    FROM vendors 
+                    WHERE item_name = v.item_name 
+                    ORDER BY price ASC 
+                    LIMIT 1
+                ) as cheapest_location,
+                (
+                    SELECT vendor_name 
+                    FROM vendors 
+                    WHERE item_name = v.item_name 
+                    ORDER BY price ASC 
+                    LIMIT 1
+                ) as cheapest_vendor
+            FROM vendors v
+            GROUP BY item_name
+        """
+        params = []
+        
+        conditions = []
+        if search_term:
+            conditions.append("item_name LIKE ?")
+            params.append(f"%{search_term}%")
+        
+        if min_discount:
+            # Calculate discount based on average price
+            conditions.append("(1 - (MIN(price) * 1.0 / AVG(price))) * 100 >= ?")
+            params.append(min_discount)
+        
+        if conditions:
+            query = f"WITH item_stats AS ({query}) SELECT * FROM item_stats WHERE " + " AND ".join(conditions)
+        else:
+            query = f"WITH item_stats AS ({query}) SELECT * FROM item_stats"
+        
+        query += " ORDER BY (avg_price - min_price) DESC LIMIT ?"
+        params.append(limit)
+        
+        items = db_fetch(query, params)
+        
+        if not items:
+            await interaction.response.send_message("No items found matching your criteria!")
+            return
             
         embed = discord.Embed(
-            title=f"🛒 Vendor Listings ({len(vendors)} results)",
+            title="🛍️ Shopee > Best Deals",
+            description=f"Showing best prices for {len(items)} unique items",
             color=discord.Color.blue()
         )
+        embed.set_footer(text=f"Server Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
-        for item in vendors:
-            name, price, amount, vendor, location = item
+        for item in items:
+            item_name, min_price, max_price, avg_price, vendor_count, cheapest_location, cheapest_vendor = item
+            discount = int((1 - (min_price / avg_price)) * 100) if avg_price else 0
+            
             embed.add_field(
-                name=f"{name} - {price:,}z",
-                value=f"**Vendor**: {vendor}\n**Stock**: {amount}\n**Location**: {location}",
+                name=f"【{item_name}】 {discount}% OFF",
+                value=(
+                    f"**Best Price:** {min_price:,}z (from `{cheapest_vendor}`)\n"
+                    f"**Max Price:** {max_price:,}z\n"
+                    f"**Average:** {int(avg_price):,}z\n"
+                    f"**Available at {vendor_count} vendors**\n"
+                    f"**Cheapest Location:** `{cheapest_location}`\n"
+                    f"Use `/sj {cheapest_vendor}` to locate"
+                ),
                 inline=False
             )
-            
+        
         await interaction.response.send_message(embed=embed)
         
     except Exception as e:
-        logger.error(f"View vendors error: {e}")
+        logger.error(f"Vendors embed command error: {e}")
         await interaction.response.send_message(
             "An error occurred while fetching vendor data",
+            ephemeral=True
+        )
+        
+@bot.tree.command(name="sj", description="Locate a specific vendor")
+@app_commands.describe(vendor_name="Vendor name to locate")
+async def locate_vendor(interaction: discord.Interaction, vendor_name: str):
+    """Find a vendor's location and items"""
+    try:
+        vendors = db_fetch(
+            """
+            SELECT v.item_name, v.price, v.location, v.vendor_title, 
+                   (SELECT AVG(price) FROM vendors WHERE item_name = v.item_name) as avg_price
+            FROM vendors v
+            WHERE v.vendor_name = ?
+            ORDER BY v.price ASC
+            """,
+            (vendor_name,)
+        )
+        
+        if not vendors:
+            await interaction.response.send_message(f"No vendor found with name: {vendor_name}")
+            return
+            
+        # Calculate best discount
+        best_discount = 0
+        for vendor in vendors:
+            item_name, price, location, vendor_title, avg_price = vendor
+            if avg_price:
+                discount = int((1 - (price / avg_price)) * 100)
+                if discount > best_discount:
+                    best_discount = discount
+        
+        embed = discord.Embed(
+            title=f"📍 Vendor {vendor_name}",
+            description=f"**{vendor_title}**" if vendors[0][3] else "No title available",
+            color=discord.Color.gold()
+        )
+        
+        if best_discount > 0:
+            embed.add_field(
+                name="Best Deal",
+                value=f"Up to {best_discount}% discount available!",
+                inline=False
+            )
+        
+        for vendor in vendors[:5]:  # Show first 5 items
+            item_name, price, location, _, avg_price = vendor
+            discount = int((1 - (price / avg_price)) * 100) if avg_price else 0
+            
+            embed.add_field(
+                name=f"【{item_name}】",
+                value=(
+                    f"Price: **{price:,}z**\n"
+                    f"Discount: {discount}%\n"
+                    f"Location: `{location}`"
+                ),
+                inline=True
+            )
+        
+        embed.set_footer(text="Use the navi command to visit this vendor")
+        await interaction.response.send_message(embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Vendor locate error: {e}")
+        await interaction.response.send_message(
+            "An error occurred while locating vendor",
             ephemeral=True
         )
 
