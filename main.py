@@ -48,6 +48,14 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             status TEXT DEFAULT 'active'
         )''',
+
+        # Add this to your init_db() function under tables
+        'ping_users': '''CREATE TABLE IF NOT EXISTS ping_users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT NOT NULL,
+            notify_threshold INTEGER DEFAULT 50,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''',
         
         'share_participants': '''CREATE TABLE IF NOT EXISTS share_participants (
             share_id INTEGER NOT NULL,
@@ -251,6 +259,118 @@ async def view_share(interaction: discord.Interaction, share_id: int):
     
     await interaction.response.send_message(embed=embed)
 
+# ===== PING COMMAND =====
+@bot.tree.command(name="ping", description="Check bot latency")
+async def ping(interaction: discord.Interaction):
+    """Check bot latency"""
+    latency = round(bot.latency * 1000)  # in ms
+    await interaction.response.send_message(f"🏓 Pong! Latency: {latency}ms")
+
+# ===== USER MANAGEMENT COMMANDS =====
+@bot.tree.command(name="add_user", description="Add user to receive notifications")
+@app_commands.describe(
+    user="User to add",
+    notify_threshold="Discount threshold for notifications (50-60%)"
+)
+async def add_user(
+    interaction: discord.Interaction, 
+    user: discord.User,
+    notify_threshold: int = 50
+):
+    """Add user to receive notifications"""
+    if notify_threshold < 50 or notify_threshold > 60:
+        await interaction.response.send_message("Threshold must be between 50-60%")
+        return
+    
+    try:
+        db_execute(
+            "INSERT OR REPLACE INTO ping_users (user_id, username, notify_threshold) VALUES (?, ?, ?)",
+            (user.id, user.name, notify_threshold)
+        )
+        await interaction.response.send_message(
+            f"✅ User {user.mention} added with notification threshold {notify_threshold}%"
+        )
+    except Exception as e:
+        logger.error(f"Error adding user: {e}")
+        await interaction.response.send_message("Failed to add user!")
+
+@bot.tree.command(name="edit_user", description="Edit user notification settings")
+@app_commands.describe(
+    user="User to edit",
+    notify_threshold="New discount threshold (50-60%)"
+)
+async def edit_user(
+    interaction: discord.Interaction, 
+    user: discord.User,
+    notify_threshold: int
+):
+    """Edit user notification settings"""
+    if notify_threshold < 50 or notify_threshold > 60:
+        await interaction.response.send_message("Threshold must be between 50-60%")
+        return
+    
+    try:
+        affected = db_execute(
+            "UPDATE ping_users SET notify_threshold = ? WHERE user_id = ?",
+            (notify_threshold, user.id)
+        )
+        
+        if affected:
+            await interaction.response.send_message(
+                f"✅ {user.mention}'s notification threshold updated to {notify_threshold}%"
+            )
+        else:
+            await interaction.response.send_message("User not found in database!")
+    except Exception as e:
+        logger.error(f"Error editing user: {e}")
+        await interaction.response.send_message("Failed to edit user!")
+
+@bot.tree.command(name="remove_user", description="Remove user from notifications")
+@app_commands.describe(user="User to remove")
+async def remove_user(interaction: discord.Interaction, user: discord.User):
+    """Remove user from notifications"""
+    try:
+        affected = db_execute(
+            "DELETE FROM ping_users WHERE user_id = ?",
+            (user.id,)
+        )
+        
+        if affected:
+            await interaction.response.send_message(f"✅ {user.mention} removed from notifications")
+        else:
+            await interaction.response.send_message("User not found in database!")
+    except Exception as e:
+        logger.error(f"Error removing user: {e}")
+        await interaction.response.send_message("Failed to remove user!")
+
+@bot.tree.command(name="list_users", description="List all users receiving notifications")
+async def list_users(interaction: discord.Interaction):
+    """List all users receiving notifications"""
+    try:
+        users = db_fetch("SELECT user_id, username, notify_threshold FROM ping_users ORDER BY username")
+        
+        if not users:
+            await interaction.response.send_message("No users in notification list!")
+            return
+            
+        embed = discord.Embed(
+            title="🔔 Notification Users",
+            description="Users who receive discount notifications",
+            color=discord.Color.blue()
+        )
+        
+        for user_id, username, threshold in users:
+            embed.add_field(
+                name=f"@{username}",
+                value=f"Threshold: {threshold}%\nUser ID: {user_id}",
+                inline=True
+            )
+            
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        logger.error(f"Error listing users: {e}")
+        await interaction.response.send_message("Failed to list users!")
+
 # ===== VENDOR SCRAPER COMMANDS =====
 # ===== VENDOR SCRAPER COMMANDS =====
 @tasks.loop(minutes=15)
@@ -265,6 +385,7 @@ async def auto_scrape_vendors():
     try:
         scraper = TalonTalesScraper()
         
+        # Fix 1: Correct method call - was scraper_login (should be scraper.login)
         if not scraper.login(TALON_USERNAME, TALON_PASSWORD):
             logger.error("Login to Talon Tales failed!")
             return
@@ -275,11 +396,20 @@ async def auto_scrape_vendors():
             logger.warning("No vendor data found in auto-scrape!")
             return
 
-        if scraper.save_to_db(vendor_data):
-            logger.info(f"Auto-saved {len(vendor_data)} vendor listings")
+        # Fix 2: Proper error handling for save_to_db
+        try:
+            if scraper.save_to_db(vendor_data):
+                logger.info(f"Auto-saved {len(vendor_data)} vendor listings")
+            else:
+                logger.error("Failed to save vendor data to database!")
+                return
+        except Exception as db_error:
+            logger.error(f"Database save error: {db_error}")
+            return
             
-            # Calculate price statistics for new bargains
-            stats = {}
+        # Calculate price statistics for new bargains
+        stats = {}
+        try:
             with sqlite3.connect(DB_NAME) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
@@ -288,41 +418,225 @@ async def auto_scrape_vendors():
                     GROUP BY item_name
                 ''')
                 stats = {row[0]: {'min': row[1], 'avg': int(row[2])} for row in cursor.fetchall()}
+        except sqlite3.Error as sql_error:
+            logger.error(f"Database query error: {sql_error}")
+            return
             
-            # Find new bargains (price < 80% of average)
-            bargains = []
-            for vendor in vendor_data:
+        # Find new bargains (price < 80% of average)
+        bargains = []
+        for vendor in vendor_data:
+            try:
                 item_stats = stats.get(vendor['item_name'], {})
                 if item_stats.get('avg') and vendor['price'] <= (item_stats['avg'] * 0.8):
                     bargains.append({
                         **vendor,
                         'discount': int((1 - (vendor['price'] / item_stats['avg'])) * 100)
                     })
+            except Exception as bargain_error:
+                logger.error(f"Error processing bargain: {bargain_error}")
+                continue
+                
+        # Only proceed if we have valid bargains
+        if not bargains:
+            logger.info("No qualifying bargains found this scan")
+            return
             
-            # Send notification if there are new bargains
-            if bargains and hasattr(bot, 'scrape_notification_channel'):
-                channel = bot.get_channel(bot.scrape_notification_channel)
-                if channel:
+        # Get users who should be notified
+        try:
+            users_to_notify = db_fetch(
+                "SELECT user_id, username, notify_threshold FROM ping_users"
+            )
+        except Exception as user_error:
+            logger.error(f"Error fetching users: {user_error}")
+            return
+            
+        # Create item to user mapping
+        item_user_map = {}
+        for user_id, username, threshold in users_to_notify:
+            try:
+                for bargain in bargains:
+                    if bargain['discount'] >= threshold:
+                        if bargain['item_name'] not in item_user_map:
+                            item_user_map[bargain['item_name']] = []
+                        item_user_map[bargain['item_name']].append(user_id)
+            except Exception as mapping_error:
+                logger.error(f"Error mapping users to items: {mapping_error}")
+                continue
+                
+        # Send DM notifications
+        for user_id, username, threshold in users_to_notify:
+            try:
+                user_bargains = [b for b in bargains if b['discount'] >= threshold]
+                if user_bargains and (user := await bot.fetch_user(user_id)):
                     embed = discord.Embed(
-                        title="🛍️ New Bargains Found!",
+                        title="🛍️ New Bargains Just For You!",
+                        description="Items matching your notification threshold:",
                         color=discord.Color.green()
                     )
                     
-                    for bargain in sorted(bargains, key=lambda x: x['discount'], reverse=True)[:3]:
+                    for bargain in sorted(user_bargains, key=lambda x: x['discount'], reverse=True)[:3]:
                         embed.add_field(
                             name=f"【{bargain['item_name']}】 {bargain['discount']}% OFF",
                             value=(
-                                f"Price: **{bargain['price']:,}z** (Avg: {item_stats['avg']:,}z)\n"
+                                f"Price: **{bargain['price']:,}z** (Avg: {stats[bargain['item_name']]['avg']:,}z)\n"
                                 f"Vendor: `{bargain['vendor_name']}` at `{bargain['location']}`\n"
                                 f"Use `/sj {bargain['vendor_name']}` to locate"
                             ),
                             inline=False
                         )
                     
-                    await channel.send(embed=embed)
+                    await user.send(embed=embed)
+            except Exception as dm_error:
+                logger.error(f"Failed to notify user {user_id}: {dm_error}")
+                continue
+                
+        # Send server notification if channel is configured
+        # In your auto_scrape_vendors function, modify the server notification part:
+        if hasattr(bot, 'scrape_notification_channel'):
+            try:
+                if channel := bot.get_channel(bot.scrape_notification_channel):
+                    top_bargains = sorted(bargains, key=lambda x: x['discount'], reverse=True)[:3]
                     
+                    embed = discord.Embed(
+                        title="🛍️ New Bargains Found!",
+                        description="Here are the best deals currently available:",
+                        color=discord.Color.green()
+                    )
+                    
+                    for bargain in top_bargains:
+                        # Get unique interested users
+                        interested_users = list(set(item_user_map.get(bargain['item_name'], [])))
+                        
+                        # Format mentions (show first 5 users + "and X more" if needed)
+                        mention_text = ""
+                        if interested_users:
+                            max_shown = 5
+                            if len(interested_users) > max_shown:
+                                shown_users = interested_users[:max_shown]
+                                mention_text = f"{' '.join([f'<@{user}>' for user in shown_users])} and {len(interested_users)-max_shown} more"
+                            else:
+                                mention_text = " ".join([f"<@{user}>" for user in interested_users])
+                        else:
+                            mention_text = "None"
+                        
+                        embed.add_field(
+                            name=f"【{bargain['item_name']}】 {bargain['discount']}% OFF",
+                            value=(
+                                f"Price: **{bargain['price']:,}z** (Avg: {stats[bargain['item_name']]['avg']:,}z)\n"
+                                f"Vendor: `{bargain['vendor_name']}` at `{bargain['location']}`\n"
+                                f"Interested: {mention_text}\n"
+                                f"Use `/sj {bargain['vendor_name']}` to locate"
+                            ),
+                            inline=False
+                        )
+                    
+                    await channel.send(embed=embed)
+            except Exception as channel_error:
+                logger.error(f"Failed to send channel notification: {channel_error}")
     except Exception as e:
         logger.error(f"Auto-scrape failed: {str(e)}")
+        # Optionally send error to a specific channel
+        if hasattr(bot, 'error_notification_channel'):
+            try:
+                if channel := bot.get_channel(bot.error_notification_channel):
+                    await channel.send(f"⚠️ Auto-scrape failed: {str(e)}")
+            except:
+                pass
+
+# SEND NOTIFICATION ON SERVER COMMAND (Configure Server)
+@bot.tree.command(name="set_notification_channel", description="Set the channel for bargain notifications")
+@app_commands.default_permissions(administrator=True)  # Only server admins can use this
+async def set_notification_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    """Set the channel for bargain notifications"""
+    bot.scrape_notification_channel = channel.id
+    await interaction.response.send_message(
+        f"✅ Bargain notifications will now be sent to {channel.mention}",
+        ephemeral=True
+    )
+
+# MANUALLY TRIGGER BARGAIN
+@bot.tree.command(name="check_bargains", description="Manually check for bargains")
+@app_commands.describe(threshold="Discount threshold (default: 50)")
+async def check_bargains(interaction: discord.Interaction, threshold: int = 50):
+    """Manually check for bargains"""
+    # Defer the response to prevent interaction timeout
+    await interaction.response.defer(thinking=True)
+    
+    if threshold < 0 or threshold > 100:
+        await interaction.followup.send("Threshold must be between 0-100%")
+        return
+    
+    try:
+        # Calculate price statistics
+        stats = {}
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT item_name, MIN(price), AVG(price) 
+                FROM vendors 
+                GROUP BY item_name
+            ''')
+            stats = {row[0]: {'min': row[1], 'avg': int(row[2])} for row in cursor.fetchall()}
+        
+        # Find current bargains
+        bargains = []
+        vendors = db_fetch('''
+            SELECT item_name, MIN(price) as price, 
+                   (SELECT vendor_name FROM vendors v2 
+                    WHERE v2.item_name = v.item_name 
+                    ORDER BY price ASC LIMIT 1) as vendor_name,
+                   (SELECT location FROM vendors v2 
+                    WHERE v2.item_name = v.item_name 
+                    ORDER BY price ASC LIMIT 1) as location
+            FROM vendors v
+            GROUP BY item_name
+        ''')
+        
+        for item in vendors:
+            item_name, price, vendor_name, location = item
+            if stats.get(item_name, {}).get('avg'):
+                discount = int((1 - (price / stats[item_name]['avg'])) * 100)
+                if discount >= threshold:
+                    bargains.append({
+                        'item_name': item_name,
+                        'price': price,
+                        'vendor_name': vendor_name,
+                        'location': location,
+                        'discount': discount,
+                        'avg_price': stats[item_name]['avg']
+                    })
+        
+        if not bargains:
+            await interaction.followup.send(
+                f"No bargains found with {threshold}% or higher discount!"
+            )
+            return
+            
+        embed = discord.Embed(
+            title=f"🔥 Current Bargains ({threshold}%+ Discount)",
+            description=f"Found {len(bargains)} items on sale!",
+            color=discord.Color.orange()
+        )
+        
+        for bargain in sorted(bargains, key=lambda x: x['discount'], reverse=True)[:5]:
+            embed.add_field(
+                name=f"【{bargain['item_name']}】 {bargain['discount']}% OFF",
+                value=(
+                    f"Price: **{bargain['price']:,}z** (Avg: {bargain['avg_price']:,}z)\n"
+                    f"Vendor: `{bargain['vendor_name']}` at `{bargain['location']}`\n"
+                    f"Use `/sj {bargain['vendor_name']}` to locate"
+                ),
+                inline=False
+            )
+        
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Check bargains error: {e}")
+        await interaction.followup.send(
+            "Failed to check for bargains!",
+            ephemeral=True
+        )
 
 @bot.tree.command(name="vendors", description="View vendor listings in classic format")
 @app_commands.describe(
