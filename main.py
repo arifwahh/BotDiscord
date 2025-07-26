@@ -268,6 +268,7 @@ async def ping(interaction: discord.Interaction):
 
 # ===== USER MANAGEMENT COMMANDS =====
 @bot.tree.command(name="add_user", description="Add user to receive notifications")
+@app_commands.default_permissions(administrator=True)  # Only server admins can use this
 @app_commands.describe(
     user="User to add",
     notify_threshold="Discount threshold for notifications (50-60%)"
@@ -295,6 +296,7 @@ async def add_user(
         await interaction.response.send_message("Failed to add user!")
 
 @bot.tree.command(name="edit_user", description="Edit user notification settings")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(
     user="User to edit",
     notify_threshold="New discount threshold (50-60%)"
@@ -326,6 +328,7 @@ async def edit_user(
         await interaction.response.send_message("Failed to edit user!")
 
 @bot.tree.command(name="remove_user", description="Remove user from notifications")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(user="User to remove")
 async def remove_user(interaction: discord.Interaction, user: discord.User):
     """Remove user from notifications"""
@@ -344,6 +347,7 @@ async def remove_user(interaction: discord.Interaction, user: discord.User):
         await interaction.response.send_message("Failed to remove user!")
 
 @bot.tree.command(name="list_users", description="List all users receiving notifications")
+@app_commands.default_permissions(administrator=True)
 async def list_users(interaction: discord.Interaction):
     """List all users receiving notifications"""
     try:
