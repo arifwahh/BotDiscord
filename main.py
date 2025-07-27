@@ -754,8 +754,11 @@ async def view_vendors_classic(
                 ""
             ])
         
-        await interaction.response.send_message(f"```\n{'\\n'.join(message)}\n```")
-        
+        # await interaction.response.send_message(f"```\n{'\\n'.join(message)}\n```")
+        message_text = '\n'.join(message)  # Use regular string join
+        await interaction.response.send_message(f"```\n{message_text}\n```")
+
+
     except Exception as e:
         logger.error(f"Vendors command error: {e}")
         await interaction.response.send_message(
