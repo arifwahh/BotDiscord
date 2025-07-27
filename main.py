@@ -312,20 +312,36 @@ async def edit_user(
         return
     
     try:
-        affected = db_execute(
-            "UPDATE ping_users SET notify_threshold = ? WHERE user_id = ?",
-            (notify_threshold, user.id)
-        )
-        
-        if affected:
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE ping_users SET notify_threshold = ? WHERE user_id = ?",
+                (notify_threshold, user.id)
+            )
+            conn.commit()
+            affected = cursor.rowcount  # Get actual number of rows affected
+            
+        if affected > 0:
             await interaction.response.send_message(
                 f"✅ {user.mention}'s notification threshold updated to {notify_threshold}%"
             )
         else:
-            await interaction.response.send_message("User not found in database!")
+            # Check if user exists first
+            exists = db_fetch(
+                "SELECT 1 FROM ping_users WHERE user_id = ?",
+                (user.id,),
+                fetch_one=True
+            )
+            if exists:
+                await interaction.response.send_message(
+                    "User found but no changes were made (same threshold?)"
+                )
+            else:
+                await interaction.response.send_message("User not found in database!")
     except Exception as e:
-        logger.error(f"Error editing user: {e}")
+        logger.error(f"Error editing user {user.id}: {e}")
         await interaction.response.send_message("Failed to edit user!")
+
 
 @bot.tree.command(name="remove_user", description="Remove user from notifications")
 @app_commands.default_permissions(administrator=True)
@@ -333,19 +349,34 @@ async def edit_user(
 async def remove_user(interaction: discord.Interaction, user: discord.User):
     """Remove user from notifications"""
     try:
-        affected = db_execute(
-            "DELETE FROM ping_users WHERE user_id = ?",
-            (user.id,)
-        )
-        
-        if affected:
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM ping_users WHERE user_id = ?",
+                (user.id,)
+            )
+            conn.commit()
+            affected = cursor.rowcount  # Get actual number of rows affected
+            
+        if affected > 0:
             await interaction.response.send_message(f"✅ {user.mention} removed from notifications")
         else:
-            await interaction.response.send_message("User not found in database!")
+            # Verify if user exists before claiming they're not found
+            exists = db_fetch(
+                "SELECT 1 FROM ping_users WHERE user_id = ?",
+                (user.id,),
+                fetch_one=True
+            )
+            if exists:
+                await interaction.response.send_message(
+                    "User found but couldn't be removed (database error?)"
+                )
+            else:
+                await interaction.response.send_message("User not found in database!")
     except Exception as e:
-        logger.error(f"Error removing user: {e}")
+        logger.error(f"Error removing user {user.id}: {e}")
         await interaction.response.send_message("Failed to remove user!")
-
+        
 @bot.tree.command(name="list_users", description="List all users receiving notifications")
 @app_commands.default_permissions(administrator=True)
 async def list_users(interaction: discord.Interaction):
